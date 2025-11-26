@@ -1,0 +1,159 @@
+import numpy as np
+import rasterio
+import tkinter as tk
+from tkinter import filedialog, messagebox
+import matplotlib.pyplot as plt
+
+# ----------------------------
+# Fonctions principales
+# ----------------------------
+
+def calculer_parametres(band1_path, band2_path, band4_path, band5_path):
+    """Calcule NDVI, ε, Δε et Ts à partir des 4 bandes NOAA/AVHRR."""
+
+    # Lecture des images
+    with rasterio.open(band1_path) as src:
+        nir = src.read(1).astype('float32') / 1000  # Normalisation réflectance
+        profile = src.profile
+
+    with rasterio.open(band2_path) as src:
+        red = src.read(1).astype('float32') / 1000
+
+    with rasterio.open(band4_path) as src:
+        T4 = src.read(1).astype('float32') / 1000  # K x 10 → Kelvin
+
+    with rasterio.open(band5_path) as src:
+        T5 = src.read(1).astype('float32') / 1000
+
+    # --- Calcul NDVI ---
+    NDVI = (nir - red) / (nir + red + 1e-10)
+
+    # --- Calcul ε et Δε ---
+    ε = np.zeros_like(NDVI)
+    Δε = np.zeros_like(NDVI)
+
+    # Cas (a) : 0.2 ≤ NDVI ≤ 0.5
+    mask_mixte = (NDVI >= 0.2) & (NDVI <= 0.5)
+    Pv = ((NDVI[mask_mixte] - 0.2) / 0.3) ** 2
+    ε4 = 0.968 + 0.021 * Pv
+    ε5 = 0.974 + 0.015 * Pv
+    ε[mask_mixte] = (ε4 + ε5) / 2
+    Δε[mask_mixte] = ε4 - ε5
+
+    # Cas (b) : NDVI < 0.2
+    mask_sol = NDVI < 0.2
+    ε[mask_sol] = 0.980 - 0.042 * nir[mask_sol]
+    Δε[mask_sol] = -0.003 - 0.029 * nir[mask_sol]
+
+    # Cas (c) : NDVI > 0.5
+    mask_veg = NDVI > 0.5
+    ε[mask_veg] = 0.985 + 0.005
+    Δε[mask_veg] = 0
+
+    # --- Calcul Ts ---
+    W = 1  # vapeur d’eau constante
+    Ts = (T4 + 1.4 * (T4 - T5) + 0.32 * (T4 - T5) ** 2 + 0.83 +
+          (57 - 5 * W) * (1 - ε) - (161 - 30 * W) * Δε)
+
+    return NDVI, ε, Δε, Ts, profile
+
+
+def afficher_image(data, titre, cmap='viridis'):
+    """Affiche une image avec Matplotlib."""
+    plt.figure(figsize=(8, 5))
+    plt.imshow(data, cmap=cmap)
+    plt.title(titre)
+    plt.colorbar(label=titre)
+    plt.axis('off')
+    plt.show()
+
+
+def enregistrer_resultat(data, filename, profile):
+    """Enregistre une image raster."""
+    with rasterio.open(filename, 'w', **profile) as dst:
+        dst.write(data, 1)
+
+
+# ----------------------------
+# Interface graphique Tkinter
+# ----------------------------
+
+class LSTApp:
+    def __init__(self, master):
+        self.master = master
+        master.title("🌍 LST NOAA/AVHRR - ENSA Tétouan")
+        master.geometry("600x400")
+        master.config(bg="#eaf6f6")
+
+        self.band1_path = ""
+        self.band2_path = ""
+        self.band4_path = ""
+        self.band5_path = ""
+
+        # --- Interface ---
+        tk.Label(master, text="Traitement d’images satellitaires (LST)", bg="#eaf6f6",
+                 font=("Arial", 16, "bold"), fg="#00796b").pack(pady=10)
+
+        self.create_button("Charger Bande 1 (NIR)", self.load_band1)
+        self.create_button("Charger Bande 2 (RED)", self.load_band2)
+        self.create_button("Charger Bande 4 (T4)", self.load_band4)
+        self.create_button("Charger Bande 5 (T5)", self.load_band5)
+
+        tk.Button(master, text="🧮 Calculer LST", bg="#4caf50", fg="white",
+                  font=("Arial", 12, "bold"), command=self.compute).pack(pady=15)
+
+        tk.Button(master, text="❌ Quitter", bg="#e53935", fg="white",
+                  command=master.quit).pack(pady=5)
+
+    def create_button(self, text, command):
+        tk.Button(self.master, text=text, width=40, command=command,
+                  bg="#0097a7", fg="white", font=("Arial", 11, "bold")).pack(pady=5)
+
+    def load_band1(self):
+        self.band1_path = filedialog.askopenfilename(title="Choisir Bande 1 (NIR)")
+        messagebox.showinfo("Bande 1 chargée", f"{self.band1_path}")
+
+    def load_band2(self):
+        self.band2_path = filedialog.askopenfilename(title="Choisir Bande 2 (RED)")
+        messagebox.showinfo("Bande 2 chargée", f"{self.band2_path}")
+
+    def load_band4(self):
+        self.band4_path = filedialog.askopenfilename(title="Choisir Bande 4 (T4)")
+        messagebox.showinfo("Bande 4 chargée", f"{self.band4_path}")
+
+    def load_band5(self):
+        self.band5_path = filedialog.askopenfilename(title="Choisir Bande 5 (T5)")
+        messagebox.showinfo("Bande 5 chargée", f"{self.band5_path}")
+
+    def compute(self):
+        if not all([self.band1_path, self.band2_path, self.band4_path, self.band5_path]):
+            messagebox.showerror("Erreur", "Veuillez charger les 4 bandes avant de continuer.")
+            return
+
+        NDVI, ε, Δε, Ts, profile = calculer_parametres(
+            self.band1_path, self.band2_path, self.band4_path, self.band5_path
+        )
+
+        # Affichage
+        afficher_image(NDVI, "NDVI")
+        afficher_image(ε, "Emissivité moyenne (ε)")
+        afficher_image(Δε, "Différence d’émissivité (Δε)")
+        afficher_image(Ts, "Température de surface (Ts, K)")
+
+        # Sauvegarde
+        enregistrer_resultat(NDVI, "NDVI_result.tif", profile)
+        enregistrer_resultat(ε, "Emissivity_result.tif", profile)
+        enregistrer_resultat(Δε, "DeltaE_result.tif", profile)
+        enregistrer_resultat(Ts, "Ts_LST_result.tif", profile)
+
+        messagebox.showinfo("Succès", "✅ Calculs terminés et fichiers sauvegardés !")
+
+
+# ----------------------------
+# Lancement du programme
+# ----------------------------
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = LSTApp(root)
+    root.mainloop()
